@@ -2,34 +2,32 @@ import os
 import io
 import time
 import threading
-from flask import Flask, render_template_string, request, send_file
+import qrcode
+import pytesseract
+from flask import Flask, render_template_string, request, send_file, jsonify
 from PIL import Image
 
 app = Flask(__name__)
 
-# इन्टरनेटका लागि एसेट्स
+# एसेट्स र कन्फिगरेसन
 PHOTO_URL = "https://smart-converter-ieh0.onrender.com/static/bs.jpg" 
 VIDEO_URL = "https://smart-converter-ieh0.onrender.com/static/an.mp4"
-
-# अस्थायी फाइलहरू बस्ने फोल्डर
 UPLOAD_FOLDER = 'temp_uploads'
+
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
 # फिचर: १० मिनेटपछि डाटा हटाउने फङ्ग्सन
 def cleanup_old_files():
     while True:
-        time.sleep(60) # हरेक १ मिनेटमा चेक गर्ने
+        time.sleep(60)
         now = time.time()
         for f in os.listdir(UPLOAD_FOLDER):
             f_path = os.path.join(UPLOAD_FOLDER, f)
-            # यदि फाइल १० मिनेट (६०० सेकेन्ड) भन्दा पुरानो छ भने हटाउने
             if os.stat(f_path).st_mtime < now - 600:
                 if os.path.isfile(f_path):
                     os.remove(f_path)
-                    print(f"Auto-deleted: {f}")
 
-# ब्याकग्राउन्डमा क्लिनअप सुरु गर्ने
 threading.Thread(target=cleanup_old_files, daemon=True).start()
 
 HTML_TEMPLATE = """
@@ -38,136 +36,150 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SmartConvert Secure | Binod Sapkota</title>
+    <title>SmartConvert Pro | Binod Sapkota</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css"/>
     <style>
         body { 
-            background: #0f172a; color: white; font-family: sans-serif;
+            background: #020617; color: white; font-family: 'Inter', sans-serif;
             background-image: url('{{ photo_url }}'); background-size: cover; background-attachment: fixed;
         }
-        body::before { content: ""; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.9); z-index: -1; }
+        body::before { content: ""; position: fixed; inset: 0; background: radial-gradient(circle at center, rgba(15, 23, 42, 0.8), #020617); z-index: -1; }
         
-        .preview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 10px; margin-top: 20px; }
-        .preview-img { width: 100%; height: 90px; object-fit: cover; border-radius: 12px; border: 2px solid #22d3ee; }
-
-        #contactModal { display: none; opacity: 0; transition: opacity 0.4s ease; }
-        #contactModal.active { display: flex; opacity: 1; }
+        .glass { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .neon-border { border: 1px solid #22d3ee; box-shadow: 0 0 15px rgba(34, 211, 238, 0.3); }
+        .tab-btn { transition: 0.3s; border-bottom: 2px solid transparent; }
+        .tab-btn.active { border-color: #22d3ee; color: #22d3ee; }
         
-        .modal-box { 
-            position: relative; border: 3px solid #22d3ee; border-radius: 2.5rem; 
-            overflow: hidden; animation: float 6s ease-in-out infinite; background: #000;
-        }
+        .preview-img { width: 80px; height: 80px; object-fit: cover; border-radius: 10px; border: 1px solid #22d3ee; }
         
-        .video-bg { position: absolute; top: 50%; left: 50%; min-width: 100%; min-height: 100%; transform: translate(-50%, -50%); z-index: -1; object-fit: cover; }
-        .video-overlay { position: absolute; inset: 0; background: rgba(15, 23, 42, 0.9); z-index: -1; }
-
-        @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-15px); } }
-        
-        .social-btn { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); transition: 0.3s; width: 100%; }
-        .social-btn:hover { background: rgba(34, 211, 238, 0.2); transform: translateX(10px); }
-        .secure-badge { background: rgba(34, 211, 238, 0.1); border: 1px solid #22d3ee; padding: 5px 12px; border-radius: 20px; font-size: 10px; color: #22d3ee; }
+        @keyframes pulse-cyan { 0% { box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(34, 211, 238, 0); } 100% { box-shadow: 0 0 0 0 rgba(34, 211, 238, 0); } }
+        .btn-glow { animation: pulse-cyan 2s infinite; }
     </style>
 </head>
-<body class="min-h-screen flex flex-col">
+<body class="min-h-screen">
 
-    <nav class="p-6 flex justify-between items-center max-w-7xl mx-auto w-full">
-        <h1 class="text-xl font-bold italic tracking-tighter">SMART<span class="text-cyan-400">CONVERTER</span></h1>
-        <div class="flex gap-4 items-center">
-            <span class="secure-badge font-bold">🔒 AUTO-DELETE: 10 MINS</span>
-            <div class="flex border border-white/10 rounded-lg overflow-hidden text-[10px]">
-                <button onclick="setLang('en')" class="px-3 py-1 bg-white/5 hover:bg-cyan-500">EN</button>
-                <button onclick="setLang('ne')" class="px-3 py-1 bg-white/5 hover:bg-cyan-500">नेपाली</button>
-            </div>
-            <button onclick="toggleModal()" class="bg-cyan-500 text-black px-5 py-1.5 rounded-full text-[10px] font-black">Contact</button>
+    <nav class="p-6 flex justify-between items-center max-w-6xl mx-auto">
+        <h1 class="text-2xl font-black italic tracking-tighter animate__animated animate__fadeInLeft">
+            SMART<span class="text-cyan-400">CONVERTER</span> <span class="text-[10px] bg-cyan-500/20 px-2 py-1 rounded ml-2">PRO</span>
+        </h1>
+        <div class="flex gap-4 items-center animate__animated animate__fadeInRight">
+            <span class="hidden md:block text-[10px] font-bold text-cyan-400 border border-cyan-400/30 px-3 py-1 rounded-full">SECURE ENCRYPTION ACTIVE</span>
+            <button onclick="toggleModal()" class="bg-white text-black px-6 py-2 rounded-full text-[11px] font-bold hover:bg-cyan-400 transition-all">CONTACT</button>
         </div>
     </nav>
 
-    <main class="flex-grow flex items-center justify-center p-6">
-        <div class="bg-white/5 backdrop-blur-2xl p-10 rounded-[2.5rem] w-full max-w-lg border border-white/10 shadow-2xl">
-            <h2 id="title" class="text-2xl font-black mb-8 text-center uppercase italic">Secure Workspace</h2>
+    <main class="max-w-4xl mx-auto p-4 mt-10">
+        <div class="glass rounded-[3rem] p-8 md:p-12 shadow-2xl animate__animated animate__zoomIn">
             
-            <form action="/convert" method="POST" enctype="multipart/form-data">
-                <div class="border-2 border-dashed border-cyan-500/40 p-12 rounded-3xl text-center relative hover:border-cyan-400 transition-all bg-black/20">
-                    <input type="file" id="imageInput" name="images" accept="image/*" multiple required 
-                           class="absolute inset-0 opacity-0 cursor-pointer z-20">
-                    <div id="drop-placeholder">
-                        <p class="text-4xl mb-3">📁</p>
-                        <p id="up-text" class="text-[10px] font-bold uppercase tracking-widest text-slate-400">Choose Multiple Photos</p>
+            <div class="flex justify-center gap-8 mb-10 border-b border-white/10">
+                <button onclick="showTab('convert-tab')" class="tab-btn active pb-4 font-bold uppercase text-xs tracking-widest" id="btn-conv">Convert</button>
+                <button onclick="showTab('qr-tab')" class="tab-btn pb-4 font-bold uppercase text-xs tracking-widest" id="btn-qr">QR Gen</button>
+                <button onclick="showTab('ocr-tab')" class="tab-btn pb-4 font-bold uppercase text-xs tracking-widest" id="btn-ocr">OCR</button>
+            </div>
+
+            <div id="convert-tab" class="tab-content">
+                <form action="/convert" method="POST" enctype="multipart/form-data">
+                    <div class="border-2 border-dashed border-cyan-500/30 p-10 rounded-3xl text-center relative hover:bg-white/5 transition-all">
+                        <input type="file" name="images" multiple class="absolute inset-0 opacity-0 cursor-pointer" onchange="previewImages(this)">
+                        <p class="text-3xl mb-2">📸</p>
+                        <p class="text-[10px] font-bold uppercase opacity-60">Drop Images or Click to Upload</p>
+                        <div id="p-grid" class="flex flex-wrap gap-2 mt-4 justify-center"></div>
                     </div>
-                    <div id="previewGrid" class="preview-grid"></div>
-                </div>
+                    
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6">
+                        <select name="format" class="bg-slate-900 border border-white/10 p-4 rounded-2xl text-xs font-bold outline-none">
+                            <option value="PDF">COMBINE TO PDF</option>
+                            <option value="PNG">TO PNG</option>
+                            <option value="JPEG">TO JPEG (COMPRESSED)</option>
+                        </select>
+                        <input type="number" name="quality" placeholder="Quality (1-100)" class="bg-slate-900 border border-white/10 p-4 rounded-2xl text-xs font-bold outline-none" value="95">
+                    </div>
 
-                <div class="mt-8">
-                    <select name="format" class="w-full bg-slate-900 border border-white/10 p-4 rounded-2xl font-bold outline-none text-white">
-                        <option value="PDF">Combined PDF</option>
-                        <option value="PNG">PNG Image</option>
-                        <option value="JPEG">JPEG Image</option>
-                    </select>
-                </div>
+                    <button type="submit" class="w-full mt-6 py-5 bg-cyan-500 text-black font-black text-xs rounded-2xl btn-glow uppercase">Start Conversion ↗</button>
+                </form>
+            </div>
 
-                <button id="btn-convert" type="submit" class="w-full mt-8 py-5 bg-cyan-500 text-black font-black text-xs rounded-2xl hover:bg-white transition-all shadow-lg">
-                    START SECURE CONVERSION ↗
-                </button>
-                <p class="text-[9px] text-center mt-4 text-slate-500 uppercase tracking-widest">All data automatically removed from server after 10 minutes</p>
-            </form>
+            <div id="qr-tab" class="tab-content hidden">
+                <div class="space-y-4">
+                    <input type="text" id="qr-input" placeholder="Enter URL or Text for QR..." class="w-full bg-slate-900 border border-white/10 p-5 rounded-2xl text-xs outline-none">
+                    <button onclick="generateQR()" class="w-full py-5 bg-white text-black font-black text-xs rounded-2xl uppercase">Generate QR Code</button>
+                    <div id="qr-result" class="flex justify-center mt-6"></div>
+                </div>
+            </div>
+
+            <div id="ocr-tab" class="tab-content hidden text-center">
+                <div class="border-2 border-dashed border-white/10 p-10 rounded-3xl mb-6">
+                    <input type="file" id="ocr-file" class="hidden" onchange="runOCR(this)">
+                    <label for="ocr-file" class="cursor-pointer">
+                        <p class="text-3xl mb-2">🔍</p>
+                        <p class="text-[10px] font-bold uppercase">Upload image to extract text</p>
+                    </label>
+                </div>
+                <textarea id="ocr-text" class="w-full h-40 bg-black/40 border border-white/10 p-4 rounded-2xl text-xs text-cyan-400 outline-none" readonly placeholder="Result will appear here..."></textarea>
+            </div>
+
         </div>
+        <p class="text-[9px] text-center mt-8 opacity-40 uppercase tracking-[0.3em]">Built for security • Auto-purges every 10 mins</p>
     </main>
 
-    <div id="contactModal" class="fixed inset-0 bg-black/90 z-50 items-center justify-center p-4 backdrop-blur-sm">
-        <div class="modal-box p-10 max-w-sm w-full text-center">
-            <video autoplay muted loop playsinline class="video-bg">
-                <source src="{{ video_url }}" type="video/mp4">
-            </video>
-            <div class="video-overlay"></div>
-            
-            <button onclick="toggleModal()" class="absolute top-6 right-6 text-white/40">✕</button>
-            <h3 class="text-3xl font-black mb-10 italic uppercase tracking-tighter">Binod Sapkota</h3>
-            
-            <div class="space-y-4">
-                <a href="https://facebook.com/petter.boe" target="_blank" class="social-btn flex items-center p-4 rounded-2xl">
-                    <span class="mr-4 text-xl">🔵</span>
-                    <span class="text-[10px] font-bold uppercase">Facebook</span>
-                </a>
-                <a href="https://wa.me/9762418689" target="_blank" class="social-btn flex items-center p-4 rounded-2xl">
-                    <span class="mr-4 text-xl">💬</span>
-                    <span class="text-[10px] font-bold uppercase">WhatsApp</span>
-                </a>
+    <div id="contactModal" class="fixed inset-0 bg-black/95 z-50 hidden items-center justify-center p-6 backdrop-blur-xl">
+        <div class="glass p-10 max-w-sm w-full text-center rounded-[3rem] neon-border relative">
+            <button onclick="toggleModal()" class="absolute top-6 right-6 opacity-50">✕</button>
+            <h3 class="text-2xl font-black italic mb-8 uppercase">Binod Sapkota</h3>
+            <div class="space-y-3">
+                <a href="https://facebook.com/petter.boe" class="block p-4 bg-white/5 rounded-2xl text-[10px] font-bold uppercase hover:bg-cyan-500 hover:text-black transition-all">Facebook</a>
+                <a href="https://wa.me/9762418689" class="block p-4 bg-white/5 rounded-2xl text-[10px] font-bold uppercase hover:bg-cyan-500 hover:text-black transition-all">WhatsApp</a>
             </div>
         </div>
     </div>
 
     <script>
-        function toggleModal() { document.getElementById('contactModal').classList.toggle('active'); }
-        function setLang(l) {
-            const t = {
-                en: { title: "Secure Workspace", up: "Choose Multiple Photos", btn: "START SECURE CONVERSION ↗" },
-                ne: { title: "सुरक्षित वर्कस्पेस", up: "धेरै फोटोहरू छान्नुहोस्", btn: "कन्भर्ट गर्नुहोस् ↗" }
-            };
-            document.getElementById('title').innerText = t[l].title;
-            document.getElementById('up-text').innerText = t[l].up;
-            document.getElementById('btn-convert').innerText = t[l].btn;
+        function showTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.add('hidden'));
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById(tabId).classList.remove('hidden');
+            event.currentTarget.classList.add('active');
         }
 
-        const input = document.getElementById('imageInput');
-        const grid = document.getElementById('previewGrid');
-        const placeholder = document.getElementById('drop-placeholder');
+        function toggleModal() { document.getElementById('contactModal').classList.toggle('flex'); document.getElementById('contactModal').classList.toggle('hidden'); }
 
-        input.onchange = () => {
+        function previewImages(input) {
+            const grid = document.getElementById('p-grid');
             grid.innerHTML = '';
-            if (input.files.length > 0) {
-                placeholder.style.display = 'none';
-                Array.from(input.files).forEach(file => {
-                    const reader = new FileReader();
-                    reader.onload = e => {
-                        const img = document.createElement('img');
-                        img.src = e.target.result;
-                        img.className = 'preview-img';
-                        grid.appendChild(img);
-                    }
-                    reader.readAsDataURL(file);
-                });
-            } else { placeholder.style.display = 'block'; }
-        };
+            Array.from(input.files).forEach(file => {
+                const reader = new FileReader();
+                reader.onload = e => {
+                    const img = document.createElement('img');
+                    img.src = e.target.result;
+                    img.className = 'preview-img animate__animated animate__fadeIn';
+                    grid.appendChild(img);
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        async function generateQR() {
+            const text = document.getElementById('qr-input').value;
+            if(!text) return alert("Please enter some text");
+            const response = await fetch('/generate_qr', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({text: text})
+            });
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            document.getElementById('qr-result').innerHTML = `<img src="${url}" class="w-48 h-48 neon-border rounded-xl p-2 bg-white">`;
+        }
+
+        async function runOCR(input) {
+            const formData = new FormData();
+            formData.append('image', input.files[0]);
+            document.getElementById('ocr-text').value = "Scanning... Please wait...";
+            const response = await fetch('/ocr', { method: 'POST', body: formData });
+            const data = await response.json();
+            document.getElementById('ocr-text').value = data.text || "No text found.";
+        }
     </script>
 </body>
 </html>
@@ -181,6 +193,8 @@ def index():
 def convert():
     files = request.files.getlist('images')
     target_format = request.form.get('format', 'PDF').upper()
+    quality = int(request.form.get('quality', 95))
+    
     if not files or files[0].filename == '': return "No files", 400
     
     imgs = [Image.open(f).convert('RGB') for f in files]
@@ -188,13 +202,29 @@ def convert():
     
     if target_format == 'PDF':
         imgs[0].save(out, format='PDF', save_all=True, append_images=imgs[1:])
-        mimetype, name = "application/pdf", "secure_binod.pdf"
+        mimetype, name = "application/pdf", "SmartConvert_Pro.pdf"
     else:
-        imgs[0].save(out, target_format, quality=95)
-        mimetype, name = f"image/{target_format.lower()}", f"secure_file.{target_format.lower()}"
+        imgs[0].save(out, target_format, quality=quality)
+        mimetype, name = f"image/{target_format.lower()}", f"converted.{target_format.lower()}"
     
     out.seek(0)
     return send_file(out, mimetype=mimetype, as_attachment=True, download_name=name)
+
+@app.route('/generate_qr', methods=['POST'])
+def generate_qr():
+    data = request.json.get('text')
+    qr = qrcode.make(data)
+    img_io = io.BytesIO()
+    qr.save(img_io, 'PNG')
+    img_io.seek(0)
+    return send_file(img_io, mimetype='image/png')
+
+@app.route('/ocr', methods=['POST'])
+def ocr_process():
+    file = request.files['image']
+    img = Image.open(file)
+    text = pytesseract.image_to_string(img)
+    return jsonify({'text': text})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
