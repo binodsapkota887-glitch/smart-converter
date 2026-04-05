@@ -229,3 +229,214 @@ def ocr_process():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+    import os
+import io
+import time
+import zipfile
+import threading
+import cv2
+import numpy as np
+from flask import Flask, render_template_string, request, send_file, jsonify
+from PIL import Image, ImageEnhance
+
+app = Flask(__name__)
+
+# Config & Paths
+PHOTO_URL = "https://smart-converter-ieh0.onrender.com/static/bs.jpg" 
+VIDEO_URL = "https://smart-converter-ieh0.onrender.com/static/an.mp4"
+UPLOAD_FOLDER = 'temp_uploads'
+if not os.path.exists(UPLOAD_FOLDER): os.makedirs(UPLOAD_FOLDER)
+
+def cleanup_files():
+    while True:
+        time.sleep(60)
+        now = time.time()
+        for f in os.listdir(UPLOAD_FOLDER):
+            if os.stat(os.path.join(UPLOAD_FOLDER, f)).st_mtime < now - 600:
+                os.remove(os.path.join(UPLOAD_FOLDER, f))
+
+threading.Thread(target=cleanup_files, daemon=True).start()
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmartConvert Pro v2 | Binod Sapkota</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css"/>
+    <style>
+        :root { --neon: #22d3ee; }
+        body { background: #020617; color: white; font-family: 'Inter', sans-serif; overflow-x: hidden; }
+        .glass { background: rgba(255, 255, 255, 0.02); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.05); }
+        .neon-text { text-shadow: 0 0 10px var(--neon); }
+        
+        /* Scanning Animation */
+        .scanner-line {
+            position: absolute; width: 100%; height: 2px; background: var(--neon);
+            top: 0; left: 0; z-index: 10; display: none;
+            box-shadow: 0 0 15px var(--neon);
+            animation: scan 2s linear infinite;
+        }
+        @keyframes scan { 0% { top: 0; } 100% { top: 100%; } }
+        
+        .tab-btn { transition: 0.4s; opacity: 0.5; }
+        .tab-btn.active { opacity: 1; border-bottom: 2px solid var(--neon); color: var(--neon); }
+        .btn-premium { background: linear-gradient(90deg, #22d3ee, #0ea5e9); color: black; font-weight: 900; transition: 0.3s; }
+        .btn-premium:hover { transform: scale(1.02); box-shadow: 0 0 20px rgba(34, 211, 238, 0.4); }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+    <nav class="p-8 flex justify-between items-center max-w-7xl mx-auto w-full">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 bg-cyan-500 rounded-lg flex items-center justify-center font-black text-black">S</div>
+            <h1 class="text-2xl font-black tracking-tighter uppercase italic neon-text">Smart<span class="text-white">Converter</span></h1>
+        </div>
+        <div class="hidden md:flex gap-6 text-[10px] font-bold tracking-[0.2em] opacity-60">
+            <span>AI ENHANCER ON</span>
+            <span>SECURE BATCH ZIP</span>
+            <span>FACE PRIVACY ACTIVE</span>
+        </div>
+    </nav>
+
+    <main class="flex-grow container mx-auto px-4 py-10 max-w-4xl">
+        <div class="glass rounded-[3.5rem] p-8 md:p-14 relative overflow-hidden animate__animated animate__fadeInUp">
+            <div id="scanLine" class="scanner-line"></div>
+            
+            <div class="flex justify-center gap-10 mb-12">
+                <button onclick="switchTab('batch')" id="tab-batch" class="tab-btn active text-xs font-black uppercase tracking-widest">Batch Process</button>
+                <button onclick="switchTab('ai')" id="tab-ai" class="tab-btn text-xs font-black uppercase tracking-widest">AI Enhancer</button>
+                <button onclick="switchTab('privacy')" id="tab-privacy" class="tab-btn text-xs font-black uppercase tracking-widest">Privacy (Blur)</button>
+            </div>
+
+            <div id="section-batch" class="tab-content">
+                <form action="/process" method="POST" enctype="multipart/form-data" onsubmit="startScan()">
+                    <input type="hidden" name="mode" value="batch">
+                    <div class="group border-2 border-dashed border-white/10 p-16 rounded-[2.5rem] text-center hover:border-cyan-500/50 transition-all cursor-pointer relative">
+                        <input type="file" name="images" multiple required class="absolute inset-0 opacity-0 cursor-pointer" onchange="updateFiles(this)">
+                        <div id="upload-icon" class="text-5xl mb-4 group-hover:scale-110 transition-transform">📁</div>
+                        <p id="file-count" class="text-xs font-bold text-slate-400 uppercase">Upload Multiple Images</p>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-4 mt-8">
+                        <select name="format" class="bg-black/50 border border-white/10 p-5 rounded-2xl text-[11px] font-bold outline-none text-cyan-400">
+                            <option value="ZIP">DOWNLOAD ALL (ZIP)</option>
+                            <option value="PDF">COMBINE TO PDF</option>
+                            <option value="JPEG">JPEG (INDIVIDUAL)</option>
+                        </select>
+                        <select name="quality" class="bg-black/50 border border-white/10 p-5 rounded-2xl text-[11px] font-bold outline-none">
+                            <option value="95">ULTRA HD (95%)</option>
+                            <option value="70">BALANCED (70%)</option>
+                            <option value="40">LOW SIZE (40%)</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="w-full mt-8 py-6 btn-premium rounded-2xl text-[11px] uppercase tracking-widest">Execute Batch Command</button>
+                </form>
+            </div>
+
+            <div id="section-ai" class="tab-content hidden">
+                <form action="/process" method="POST" enctype="multipart/form-data" onsubmit="startScan()">
+                    <input type="hidden" name="mode" value="enhance">
+                    <div class="border-2 border-dashed border-white/10 p-16 rounded-[2.5rem] text-center">
+                        <input type="file" name="images" required class="absolute opacity-0 cursor-pointer w-full h-full left-0 top-0">
+                        <p class="text-xs font-bold text-cyan-400 uppercase">AI Auto-Fix & Sharpen</p>
+                    </div>
+                    <button type="submit" class="w-full mt-8 py-6 btn-premium rounded-2xl text-[11px] uppercase">Enhance Image ⚡</button>
+                </form>
+            </div>
+
+            <div id="section-privacy" class="tab-content hidden">
+                <form action="/process" method="POST" enctype="multipart/form-data" onsubmit="startScan()">
+                    <input type="hidden" name="mode" value="blur">
+                    <div class="border-2 border-dashed border-white/10 p-16 rounded-[2.5rem] text-center">
+                        <input type="file" name="images" required class="absolute opacity-0 cursor-pointer w-full h-full left-0 top-0">
+                        <p class="text-xs font-bold text-red-400 uppercase">Auto Face Detection & Blur</p>
+                    </div>
+                    <button type="submit" class="w-full mt-8 py-6 bg-red-500 text-white font-black rounded-2xl text-[11px] uppercase">Secure & Blur Faces</button>
+                </form>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        function switchTab(id) {
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('section-' + id).classList.remove('hidden');
+            document.getElementById('tab-' + id).classList.add('active');
+        }
+        function startScan() { document.getElementById('scanLine').style.display = 'block'; }
+        function updateFiles(input) {
+            document.getElementById('file-count').innerText = input.files.length + " Files Selected";
+            document.getElementById('upload-icon').innerText = "✅";
+        }
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/process', methods=['POST'])
+def process():
+    mode = request.form.get('mode')
+    files = request.files.getlist('images')
+    if not files or files[0].filename == '': return "No files", 400
+
+    out_io = io.BytesIO()
+    
+    # 1. Batch Processing (ZIP/PDF)
+    if mode == 'batch':
+        target = request.form.get('format')
+        quality = int(request.form.get('quality', 95))
+        
+        if target == 'ZIP':
+            with zipfile.ZipFile(out_io, 'w') as zf:
+                for i, f in enumerate(files):
+                    img = Image.open(f).convert('RGB')
+                    img_byte = io.BytesIO()
+                    img.save(img_byte, format='JPEG', quality=quality)
+                    zf.writestr(f"image_{i+1}.jpg", img_byte.getvalue())
+            out_io.seek(0)
+            return send_file(out_io, mimetype="application/zip", as_attachment=True, download_name="Batch_Converted.zip")
+        
+        elif target == 'PDF':
+            imgs = [Image.open(f).convert('RGB') for f in files]
+            imgs[0].save(out_io, format='PDF', save_all=True, append_images=imgs[1:])
+            out_io.seek(0)
+            return send_file(out_io, mimetype="application/pdf", as_attachment=True, download_name="Combined_Pro.pdf")
+
+    # 2. AI Enhancement
+    elif mode == 'enhance':
+        img = Image.open(files[0]).convert('RGB')
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.2) # Contrast Up
+        enhancer = ImageEnhance.Sharpness(img)
+        img = enhancer.enhance(1.5) # Sharpness Up
+        img.save(out_io, format='JPEG', quality=100)
+        out_io.seek(0)
+        return send_file(out_io, mimetype="image/jpeg", as_attachment=True, download_name="AI_Enhanced.jpg")
+
+    # 3. Face Blur (OpenCV)
+    elif mode == 'blur':
+        # PIL to OpenCV
+        img_data = np.frombuffer(files[0].read(), np.uint8)
+        img = cv2.imdecode(img_data, cv2.IMREAD_COLOR)
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        
+        for (x, y, w, h) in faces:
+            sub_face = img[y:y+h, x:x+w]
+            sub_face = cv2.GaussianBlur(sub_face, (99, 99), 30)
+            img[y:y+h, x:x+w] = sub_face
+            
+        _, buffer = cv2.imencode('.jpg', img)
+        return send_file(io.BytesIO(buffer), mimetype="image/jpeg", as_attachment=True, download_name="Privacy_Blurred.jpg")
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
